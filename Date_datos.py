@@ -228,9 +228,8 @@ def add_deposit_record(fecha_d, empresa, agencia, monto):
     }
     st.session_state.df = pd.concat([df_actual, pd.DataFrame([nuevo_registro])], ignore_index=True)
     if save_dataframe(st.session_state.df, DEPOSITS_FILE):
+        st.session_state.deposit_added = True # Flag para indicar que se añadió un depósito
         st.success("Deposito agregado exitosamente. Recalculando saldos...")
-        recalculate_accumulated_balances() # Recalcula tras añadir un depósito
-        st.experimental_rerun() # Refresca la página para limpiar el formulario y mostrar datos actualizados
     else:
         st.error("Error al guardar el depósito.")
 
@@ -250,9 +249,8 @@ def delete_deposit_record(deposito_info_to_delete):
         df_to_delete_from.reset_index(drop=True, inplace=True)
         st.session_state.df = df_to_delete_from
         if save_dataframe(st.session_state.df, DEPOSITS_FILE):
+            st.session_state.deposit_deleted = True # Flag para indicar que se eliminó un depósito
             st.sidebar.success("Deposito eliminado correctamente. Recalculando saldos...")
-            recalculate_accumulated_balances() # Recalcula tras eliminar un depósito
-            st.experimental_rerun()
         else:
             st.sidebar.error("Error al eliminar el depósito.")
     else:
@@ -332,9 +330,8 @@ def add_supplier_record(fecha, proveedor, cantidad, peso_salida, peso_entrada, t
     st.session_state.data = pd.concat([df_balance, df_temp], ignore_index=True)
     
     if save_dataframe(st.session_state.data, DATA_FILE):
+        st.session_state.record_added = True # Flag para indicar que se añadió un registro
         st.success("Registro agregado correctamente. Recalculando saldos...")
-        recalculate_accumulated_balances() # Recalcula tras añadir un registro
-        st.experimental_rerun()
         return True
     else:
         st.error("Error al guardar el registro.")
@@ -424,9 +421,8 @@ def import_excel_data(archivo_excel):
 
 
             if save_dataframe(st.session_state.data, DATA_FILE):
+                st.session_state.data_imported = True # Flag para indicar que se importaron datos
                 st.success("Datos importados correctamente. Recalculando saldos...")
-                recalculate_accumulated_balances() # Recalcula tras importar datos
-                st.experimental_rerun()
             else:
                 st.error("Error al guardar los datos importados.")
 
@@ -452,9 +448,8 @@ def delete_record(record_info_to_delete):
         df_to_delete_from.reset_index(drop=True, inplace=True)
         st.session_state.data = df_to_delete_from
         if save_dataframe(st.session_state.data, DATA_FILE):
+            st.session_state.record_deleted = True # Flag para indicar que se eliminó un registro
             st.success("Registro eliminado correctamente. Recalculando saldos...")
-            recalculate_accumulated_balances() # Recalcula tras eliminar un registro
-            st.experimental_rerun()
         else:
             st.error("Error al eliminar el registro.")
     else:
@@ -485,9 +480,8 @@ def add_debit_note(fecha_nota, descuento, descuento_real):
     }
     st.session_state.notas = pd.concat([st.session_state.notas, pd.DataFrame([nueva_nota])], ignore_index=True)
     if save_dataframe(st.session_state.notas, DEBIT_NOTES_FILE):
+        st.session_state.debit_note_added = True # Flag para indicar que se añadió una nota de débito
         st.success("Nota de debito agregada correctamente. Recalculando saldos...")
-        recalculate_accumulated_balances() # Recalcula tras añadir una nota de débito
-        st.experimental_rerun()
     else:
         st.error("Error al guardar la nota de débito.")
 
@@ -507,9 +501,8 @@ def delete_debit_note_record(nota_info_to_delete):
         df_to_delete_from.reset_index(drop=True, inplace=True)
         st.session_state.notas = df_to_delete_from
         if save_dataframe(st.session_state.notas, DEBIT_NOTES_FILE):
+            st.session_state.debit_note_deleted = True # Flag para indicar que se eliminó una nota de débito
             st.success("Nota de debito eliminada correctamente. Recalculando saldos...")
-            recalculate_accumulated_balances() # Recalcula tras eliminar una nota
-            st.experimental_rerun()
         else:
             st.error("Error al eliminar la nota de débito.")
     else:
@@ -536,11 +529,12 @@ def render_delete_deposit_section():
     """Renderiza la sección para eliminar depósitos en el sidebar."""
     st.sidebar.subheader("Eliminar un Depósito")
     if not st.session_state.df.empty:
-        st.session_state.df["Mostrar"] = st.session_state.df.apply(
+        df_display_deposits = st.session_state.df.copy()
+        df_display_deposits["Mostrar"] = df_display_deposits.apply(
             lambda row: f"{row['Fecha']} - {row['Empresa']} - ${row['Monto']:.2f}", axis=1
         )
         deposito_a_eliminar = st.sidebar.selectbox(
-            "Selecciona un depósito a eliminar", st.session_state.df["Mostrar"], key="delete_deposit_select"
+            "Selecciona un depósito a eliminar", df_display_deposits["Mostrar"], key="delete_deposit_select"
         )
         if st.sidebar.button("Eliminar depósito seleccionado", key="delete_deposit_button"):
             # Añadir confirmación antes de eliminar
@@ -654,19 +648,20 @@ def render_tables_and_download():
 
     # Tabla de Notas de Débito
     if not st.session_state.notas.empty:
-        st.session_state.notas["Mostrar"] = st.session_state.notas.apply(
+        df_display_notes = st.session_state.notas.copy()
+        df_display_notes["Mostrar"] = df_display_notes.apply(
             lambda row: f"{row['Fecha']} - Libras: {row['Libras calculadas']:.2f} - Descuento real: ${row['Descuento real']:.2f}", axis=1
         )
         display_formatted_dataframe(
-            st.session_state.notas,
+            df_display_notes,
             "Tabla de Notas de Débito",
             columns_to_format=["Descuento posible", "Descuento real"],
             exclude_mostrar=False # No excluir para la selección de eliminación
         )
         st.subheader("Eliminar una Nota de Débito")
         # Asegurarse de que el selectbox tenga opciones si el DF no está vacío
-        if not st.session_state.notas["Mostrar"].empty:
-            nota_a_eliminar = st.selectbox("Selecciona una nota para eliminar", st.session_state.notas["Mostrar"], key="delete_debit_note_select")
+        if not df_display_notes["Mostrar"].empty:
+            nota_a_eliminar = st.selectbox("Selecciona una nota para eliminar", df_display_notes["Mostrar"], key="delete_debit_note_select")
             if st.button("Eliminar Nota de Débito seleccionada", key="delete_debit_note_button"):
                 if st.checkbox("Confirmar eliminación de la nota de débito", key="confirm_delete_debit_note"):
                     delete_debit_note_record(nota_a_eliminar)
@@ -863,3 +858,37 @@ elif opcion == "Reporte Mensual":
 
 elif opcion == "Gráficos":
     render_charts()
+
+# --- Manejo de reruns después de las operaciones ---
+# Flags para controlar cuándo se necesita un rerun
+if "deposit_added" not in st.session_state:
+    st.session_state.deposit_added = False
+if "deposit_deleted" not in st.session_state:
+    st.session_state.deposit_deleted = False
+if "record_added" not in st.session_state:
+    st.session_state.record_added = False
+if "record_deleted" not in st.session_state:
+    st.session_state.record_deleted = False
+if "data_imported" not in st.session_state:
+    st.session_state.data_imported = False
+if "debit_note_added" not in st.session_state:
+    st.session_state.debit_note_added = False
+if "debit_note_deleted" not in st.session_state:
+    st.session_state.debit_note_deleted = False
+
+
+if st.session_state.deposit_added or st.session_state.deposit_deleted or \
+   st.session_state.record_added or st.session_state.record_deleted or \
+   st.session_state.data_imported or st.session_state.debit_note_added or \
+   st.session_state.debit_note_deleted:
+    
+    st.session_state.deposit_added = False
+    st.session_state.deposit_deleted = False
+    st.session_state.record_added = False
+    st.session_state.record_deleted = False
+    st.session_state.data_imported = False
+    st.session_state.debit_note_added = False
+    st.session_state.debit_note_deleted = False
+    
+    recalculate_accumulated_balances()
+    st.experimental_rerun()
