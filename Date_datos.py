@@ -66,25 +66,29 @@ def initialize_session_state():
     """Inicializa todos los DataFrames en st.session_state."""
     if "data" not in st.session_state:
         st.session_state.data = load_dataframe(DATA_FILE, COLUMNS_DATA, ["Fecha"])
-        if st.session_state.data.empty:
-            # Si el DF está vacío, inicializarlo con solo la fila de saldo acumulado inicial
-            # Esta fila no debe ser una entrada de registro normal
+        
+        # Ensure the initial balance row exists and is correctly structured
+        if not any(st.session_state.data["Proveedor"] == "BALANCE_INICIAL"):
             fila_inicial_saldo = {col: None for col in COLUMNS_DATA}
-            fila_inicial_saldo["Fecha"] = datetime(1900, 1, 1).date() # Fecha muy antigua para que siempre sea la primera
+            fila_inicial_saldo["Fecha"] = datetime(1900, 1, 1).date() # A very old date to ensure it's always first
             fila_inicial_saldo["Proveedor"] = "BALANCE_INICIAL"
             fila_inicial_saldo["Saldo diario"] = 0.00
             fila_inicial_saldo["Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE
-            st.session_state.data = pd.DataFrame([fila_inicial_saldo])
-        else:
-            # Asegurarse de que el balance inicial exista si ya hay datos
-            if not any(st.session_state.data["Proveedor"] == "BALANCE_INICIAL"):
-                fila_inicial_saldo = {col: None for col in COLUMNS_DATA}
-                fila_inicial_saldo["Fecha"] = datetime(1900, 1, 1).date()
-                fila_inicial_saldo["Proveedor"] = "BALANCE_INICIAL"
-                fila_inicial_saldo["Saldo diario"] = 0.00
-                fila_inicial_saldo["Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE
+            
+            # If the DataFrame is empty, just set it to the initial balance row
+            if st.session_state.data.empty:
+                st.session_state.data = pd.DataFrame([fila_inicial_saldo])
+            else:
+                # If there are existing data, concatenate it, placing the initial balance at the top
                 st.session_state.data = pd.concat([pd.DataFrame([fila_inicial_saldo]), st.session_state.data], ignore_index=True)
-
+        else:
+            # If "BALANCE_INICIAL" exists, ensure its accumulated balance is correct
+            initial_balance_idx = st.session_state.data[st.session_state.data["Proveedor"] == "BALANCE_INICIAL"].index
+            if not initial_balance_idx.empty:
+                st.session_state.data.loc[initial_balance_idx[0], "Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE
+                st.session_state.data.loc[initial_balance_idx[0], "Saldo diario"] = 0.0 # Ensure it doesn't affect daily sums
+                st.session_state.data.loc[initial_balance_idx[0], "Monto Deposito"] = 0.0
+                st.session_state.data.loc[initial_balance_idx[0], "Total ($)"] = 0.0
 
     if "df" not in st.session_state:
         st.session_state.df = load_dataframe(DEPOSITS_FILE, COLUMNS_DEPOSITS, ["Fecha"])
@@ -115,15 +119,19 @@ def recalculate_accumulated_balances():
     for col in ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)"]:
         df_data[col] = pd.to_numeric(df_data[col], errors='coerce').fillna(0)
 
-    df_data["Kilos Restantes"] = df_data["Peso Salida (kg)"] - df_data["Peso Entrada (kg)"]
-    df_data["Libras Restantes"] = df_data["Kilos Restantes"] * LBS_PER_KG
-    df_data["Promedio"] = df_data.apply(lambda row: row["Libras Restantes"] / row["Cantidad"] if row["Cantidad"] != 0 else 0, axis=1)
-    df_data["Total ($)"] = df_data["Libras Restantes"] * df_data["Precio Unitario ($)"]
-
-    # Excluir la fila de 'BALANCE_INICIAL' de los cálculos diarios y de depósito
+    # Excluir la fila de 'BALANCE_INICIAL' de los cálculos de Kilos/Libras/Total
     df_data_operaciones = df_data[df_data["Proveedor"] != "BALANCE_INICIAL"].copy()
     df_initial_balance = df_data[df_data["Proveedor"] == "BALANCE_INICIAL"].copy()
 
+    if not df_data_operaciones.empty:
+        df_data_operaciones["Kilos Restantes"] = df_data_operaciones["Peso Salida (kg)"] - df_data_operaciones["Peso Entrada (kg)"]
+        df_data_operaciones["Libras Restantes"] = df_data_operaciones["Kilos Restantes"] * LBS_PER_KG
+        df_data_operaciones["Promedio"] = df_data_operaciones.apply(lambda row: row["Libras Restantes"] / row["Cantidad"] if row["Cantidad"] != 0 else 0, axis=1)
+        df_data_operaciones["Total ($)"] = df_data_operaciones["Libras Restantes"] * df_data_operaciones["Precio Unitario ($)"]
+    else:
+        # If no operations, ensure these columns exist with default values
+        for col in ["Kilos Restantes", "Libras Restantes", "Promedio", "Total ($)"]:
+            df_data_operaciones[col] = 0.0
 
     # Calcular Monto Deposito para cada registro de datos
     deposits_summary = df_deposits.groupby(["Fecha", "Empresa"])["Monto"].sum().reset_index()
@@ -160,36 +168,47 @@ def recalculate_accumulated_balances():
         full_daily_balances = daily_summary_operaciones.copy()
         full_daily_balances["SaldoDiarioAjustado"] = full_daily_balances["SaldoDiarioConsolidado"]
 
-    # Calcular el Saldo Acumulado
+    # Sort by date for cumulative sum
     full_daily_balances = full_daily_balances.sort_values("Fecha")
+
+    # Calculate accumulated balance starting from INITIAL_ACCUMULATED_BALANCE
     full_daily_balances["Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE + full_daily_balances["SaldoDiarioAjustado"].cumsum()
 
-    # Fusionar el Saldo Acumulado de vuelta a df_data_operaciones
-    df_data_operaciones = pd.merge(df_data_operaciones, full_daily_balances[["Fecha", "Saldo Acumulado"]], on="Fecha", how="left", suffixes=('', '_new'))
-    df_data_operaciones["Saldo Acumulado"] = df_data_operaciones["Saldo Acumulado_new"]
-    df_data_operaciones.drop(columns=["Saldo Acumulado_new"], inplace=True)
+    # Create a DataFrame for all dates including the initial balance date
+    all_dates = pd.DataFrame(df_data["Fecha"].unique(), columns=["Fecha"]).sort_values("Fecha")
+    
+    # Merge the calculated daily and accumulated balances back into the main operations DataFrame
+    # Ensure all columns from COLUMNS_DATA are present and have correct dtypes before merging
+    df_data_operaciones = pd.merge(
+        df_data_operaciones.drop(columns=["Saldo diario", "Monto Deposito", "Saldo Acumulado"], errors='ignore'),
+        full_daily_balances[["Fecha", "SaldoDiarioAjustado", "Saldo Acumulado"]].rename(columns={"SaldoDiarioAjustado": "Saldo diario"}),
+        on="Fecha",
+        how="left"
+    )
+    # Fill NaN for Saldo diario and Saldo Acumulado in operations that might not have a corresponding daily entry
+    df_data_operaciones["Saldo diario"] = df_data_operaciones["Saldo diario"].fillna(0)
+    df_data_operaciones["Saldo Acumulado"] = df_data_operaciones["Saldo Acumulado"].fillna(method='ffill').fillna(INITIAL_ACCUMULATED_BALANCE)
 
-    # Reintegrar la fila de BALANCE_INICIAL al DataFrame principal
-    # Asegurarse de que la fila inicial tenga el saldo acumulado correcto
+    # Reintegrate the initial balance row
     if not df_initial_balance.empty:
         df_initial_balance["Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE
-        # Para las otras columnas de saldo diario/deposito/total, pueden ser 0 o NaN según el diseño
-        df_initial_balance["Monto Deposito"] = 0.0
         df_initial_balance["Saldo diario"] = 0.0
+        df_initial_balance["Monto Deposito"] = 0.0
         df_initial_balance["Total ($)"] = 0.0
-        
-        # Concatenar la fila inicial de nuevo
         df_data = pd.concat([df_initial_balance, df_data_operaciones], ignore_index=True)
     else:
         df_data = df_data_operaciones
 
-    # Asegurarse de que el orden sea consistente para la visualización
+    # Ensure all original columns are present and in order
+    df_data = df_data[COLUMNS_DATA]
+    
+    # Sort the final DataFrame
     df_data = df_data.sort_values(["Fecha", "N"]).reset_index(drop=True)
 
-    # Limpiar filas con Nulos de fechas si se generaron por un merge con fechas inexistentes
+    # Clean rows with NaN dates if generated by a merge with non-existent dates
     df_data.dropna(subset=["Fecha"], inplace=True)
 
-    # Finalmente, actualiza el st.session_state.data con los saldos recalculados
+    # Finally, update st.session_state.data with the recalculated balances
     st.session_state.data = df_data
     save_dataframe(st.session_state.data, DATA_FILE)
 
@@ -209,12 +228,12 @@ def add_deposit_record(fecha_d, empresa, agencia, monto):
         # Si ya hay un depósito para esta fecha, usa el 'N' más alto existente para esa fecha
         # Convertir 'N' a entero para MAX y luego a string de nuevo
         max_n_for_date = coincidencia_fecha["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
-        numero = f"{max_n_for_date:02}" # Formato de dos dígitos
+        numero = f"{max_n_for_date + 1:02}" # Increment N for the same date
     else:
-        # Si no hay depósitos para esta fecha, crea un nuevo N basado en el número de fechas únicas
-        # Obtener el máximo N global
+        # If no deposits for this date, find the overall max N and increment
+        # This logic ensures 'N' is unique and sequential overall, not just by date
         max_n_global = df_actual["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
-        numero = f"{max_n_global + 1:02}" # Formato de dos dígitos
+        numero = f"{max_n_global + 1:02}" # Format as two digits
     
     documento = "Deposito" if "Cajero" in agencia else "Transferencia"
     
@@ -288,12 +307,12 @@ def add_supplier_record(fecha, proveedor, cantidad, peso_salida, peso_entrada, t
         # Si ya hay un registro para esta fecha, usa el 'N' más alto existente para esa fecha
         # Convertir 'N' a entero para MAX y luego a string de nuevo
         max_n_for_date = df_filtered_by_date["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
-        enumeracion = f"{max_n_for_date:02}"
+        enumeracion = f"{max_n_for_date + 1:02}" # Increment N for the same date
     else:
         # Si no hay registros para esta fecha, crea un nuevo N basado en el número de fechas únicas
         # Obtener el máximo N global de registros de operaciones (excluyendo la fila inicial)
         max_n_global = df_operaciones_existente["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
-        enumeracion = f"{max_n_global + 1:02}" # Formato de dos dígitos
+        enumeracion = f"{max_n_global + 1:02}" # Format as two digits
 
     nueva_fila = {
         "N": enumeracion,
@@ -315,13 +334,9 @@ def add_supplier_record(fecha, proveedor, cantidad, peso_salida, peso_entrada, t
         "Saldo Acumulado": 0.0 # Se llenará con el recalculado
     }
 
-    # Asegurarse de que la fila de balance inicial no sea eliminada por drop_duplicates
-    if "BALANCE_INICIAL" in df["Proveedor"].values:
-        df_temp = df[df["Proveedor"] != "BALANCE_INICIAL"].copy()
-        df_balance = df[df["Proveedor"] == "BALANCE_INICIAL"].copy()
-    else:
-        df_temp = df.copy()
-        df_balance = pd.DataFrame(columns=COLUMNS_DATA) # DataFrame vacío si no hay balance inicial
+    # Separate the initial balance row
+    df_balance = df[df["Proveedor"] == "BALANCE_INICIAL"].copy()
+    df_temp = df[df["Proveedor"] != "BALANCE_INICIAL"].copy()
 
     df_temp = pd.concat([df_temp, pd.DataFrame([nueva_fila])], ignore_index=True)
     df_temp.drop_duplicates(subset=["Fecha", "Proveedor", "Peso Salida (kg)", "Peso Entrada (kg)", "Tipo Documento"], keep='last', inplace=True)
@@ -378,20 +393,15 @@ def import_excel_data(archivo_excel):
             current_ops_data = current_data_df[current_data_df["Proveedor"] != "BALANCE_INICIAL"].copy()
 
             # Mapeo de fechas existentes a sus N asignados
-            existing_date_n_map = current_ops_data.set_index('Fecha')['N'].to_dict()
-
-            # Obtener el máximo N actual de las operaciones
+            # This logic needs refinement if 'N' needs to be truly unique for each record.
+            # If 'N' is a serial number per day, this logic is fine. If it's a global unique ID, it needs change.
+            # Assuming 'N' is unique per record, we find the max N overall for new records.
             max_n_existing = current_ops_data["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
             new_n_counter = max_n_existing + 1
             
             for idx, row in df_importado.iterrows():
-                date = row["Fecha"]
-                if date in existing_date_n_map:
-                    df_importado.loc[idx, "N"] = existing_date_n_map[date]
-                else:
-                    df_importado.loc[idx, "N"] = f"{new_n_counter:02}"
-                    existing_date_n_map[date] = df_importado.loc[idx, "N"] # Guardar para futuras filas importadas en el mismo archivo
-                    new_n_counter += 1
+                df_importado.loc[idx, "N"] = f"{new_n_counter:02}"
+                new_n_counter += 1
 
             # Limpiar columnas de saldo antes de la concatenación para que `recalculate_accumulated_balances` las recalcule
             df_importado["Monto Deposito"] = 0.0
@@ -403,13 +413,9 @@ def import_excel_data(archivo_excel):
             # Asegurarse de que el orden de las columnas sea el mismo que COLUMNS_DATA
             df_to_add = df_importado[COLUMNS_DATA]
 
-            # Separar la fila de balance inicial para no eliminarla al hacer drop_duplicates
-            if "BALANCE_INICIAL" in current_data_df["Proveedor"].values:
-                df_temp = current_data_df[current_data_df["Proveedor"] != "BALANCE_INICIAL"].copy()
-                df_balance = current_data_df[current_data_df["Proveedor"] == "BALANCE_INICIAL"].copy()
-            else:
-                df_temp = current_data_df.copy()
-                df_balance = pd.DataFrame(columns=COLUMNS_DATA) # DataFrame vacío
+            # Separate the initial balance row
+            df_balance = current_data_df[current_data_df["Proveedor"] == "BALANCE_INICIAL"].copy()
+            df_temp = current_data_df[current_data_df["Proveedor"] != "BALANCE_INICIAL"].copy()
 
             df_temp = pd.concat([df_temp, df_to_add], ignore_index=True)
             
@@ -891,4 +897,4 @@ if st.session_state.deposit_added or st.session_state.deposit_deleted or \
     st.session_state.debit_note_deleted = False
     
     recalculate_accumulated_balances()
-    st.experimental_rerun()
+    st.rerun() # Changed from st.experimental_rerun()
